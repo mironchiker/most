@@ -830,6 +830,21 @@ window.addEventListener('pagehide', () => {
 
 $('micPerm').onclick = () => requestDevice('mic');
 $('camPerm').onclick = () => requestDevice('cam');
+
+// Показываем реальный статус разрешения сразу при загрузке страницы,
+// не дожидаясь клика. Если браузер уже когда-то блокировал доступ,
+// getUserMedia больше не покажет диалог сам — это нормальное поведение
+// браузера, а не баг приложения, и это важно увидеть сразу, а не гадать.
+(async () => {
+  if (!navigator.permissions?.query) return;
+  const mic = await permState('mic');
+  const cam = await permState('cam');
+  if (mic === 'denied') setDevBtn('mic', 'denied');
+  if (cam === 'denied') setDevBtn('cam', 'denied');
+  if (mic === 'denied' || cam === 'denied') {
+    setErr('Доступ заблокирован браузером. Нажми на замок рядом с адресом сайта → разреши микрофон/камеру → обнови страницу.');
+  }
+})();
 $('createBtn').onclick = createRoom;
 $('joinBtn').onclick = () => $('joinBox').classList.toggle('hidden');
 
