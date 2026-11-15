@@ -2,12 +2,9 @@
   publish = "."
   functions = "netlify/functions"
 
-# Явный редирект-страховка: даже если автоматический роутинг по
-# export const config = { path: "/api/signal" } в самой функции
-# не подхватится рантаймом, запрос всё равно дойдёт до неё напрямую
-# по стандартному адресу /.netlify/functions/<имя>.
-[[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/:splat"
-  status = 200
-  force = true
+# НЕ добавлять сюда редирект /api/* -> /.netlify/functions/:splat.
+# Функция signal.mjs уже сама объявляет export const config = { path: "/api/signal" } —
+# это нативный способ Netlify Functions v2 давать кастомный URL. При этом
+# функция НЕ доступна по старому адресу /.netlify/functions/signal.
+# Redirect с force=true перехватывает /api/signal раньше, чем он доходит
+# до нативного роута, и уводит его на несуществующий путь — 404.
