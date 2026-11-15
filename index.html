@@ -432,14 +432,6 @@ function acquire(kind) {
     .then(s => kind === 'audio' ? s.getAudioTracks()[0] : s.getVideoTracks()[0]);
 }
 
-// Запрашивает микрофон и камеру ОДНИМ вызовом getUserMedia, если ни один
-// из них ещё не выдан — так браузер показывает один нормальный диалог
-// разрешений на оба устройства сразу, а не два по очереди.
-async function acquireBoth() {
-  const s = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-  return { audio: s.getAudioTracks()[0], video: s.getVideoTracks()[0] };
-}
-
 function setDevBtn(kind, state) {
   // state: true (granted) | false (not requested) | 'denied'
   const b = $(kind + 'Perm');
@@ -453,27 +445,30 @@ function setDevBtn(kind, state) {
       : (kind === 'mic' ? 'не разрешён' : 'не разрешено');
 }
 
+// Каждое устройство запрашивается СВОИМ отдельным getUserMedia-вызовом.
+// Важно: не объединять audio+video в один getUserMedia({audio,video}) —
+// такой запрос целиком падает, если хотя бы одно устройство недоступно
+// или его разрешение отклонено, даже когда второе устройство в порядке.
+// Раздельные вызовы дают независимый результат по каждому устройству.
 async function requestDevice(kind) {
   const have = kind === 'mic' ? audioTrack : videoTrack;
   if (have) return;
   setErr('Жду ответа браузера…');
-  const needAudio = kind === 'mic' && !audioTrack;
-  const needVideo = kind === 'cam' && !videoTrack;
-  const alsoOther = kind === 'mic' ? !videoTrack : !audioTrack;
   try {
-    if (alsoOther && !audioTrack && !videoTrack) {
-      // ни разу не спрашивали — просим оба устройства одним запросом
-      const { audio, video } = await acquireBoth();
-      audioTrack = audio;
-      videoTrack = video;
-      setDevBtn('mic', true);
-      setDevBtn('cam', true);
-    } else {
-      const t = await acquire(kind === 'mic' ? 'audio' : 'video');
-      if (kind === 'mic') audioTrack = t; else videoTrack = t;
-      setDevBtn(kind, true);
-    }
+    const t = await acquire(kind === 'mic' ? 'audio' : 'video');
+    if (kind === 'mic') audioTrack = t; else videoTrack = t;
+    setDevBtn(kind, true);
     setErr('');
+    if (roomShown) {
+      localStream.addTrack(t);
+      for (const pc of pcs.values()) {
+        const tr = pc.getTransceivers().find(tt => tt.receiver.track?.kind === t.kind && !tt.sender.track);
+        if (tr) { await tr.sender.replaceTrack(t); tr.direction = 'sendrecv'; }
+        else pc.addTrack(t, localStream);
+      }
+      syncControls();
+      broadcastState();
+    }
   } catch (e) {
     const denied = (await permState(kind)) === 'denied';
     setDevBtn(kind, denied ? 'denied' : false);
@@ -481,27 +476,13 @@ async function requestDevice(kind) {
   }
 }
 
+// По умолчанию в руме запрашивается ТОЛЬКО микрофон. Камера остаётся
+// выключенной (видеотрек не берётся) — включить её можно вручную кнопкой
+// камеры в руме или карточкой «Видео» на старте.
 async function getMedia() {
   const problems = [];
-  if (!audioTrack && !videoTrack) {
-    // первый вход в комнату: один объединённый запрос вместо двух подряд
-    try {
-      const { audio, video } = await acquireBoth();
-      audioTrack = audio;
-      videoTrack = video;
-    } catch (e) {
-      // юзер мог отклонить общий диалог — пробуем по отдельности,
-      // чтобы дать использовать хотя бы одно устройство
-      try { audioTrack = await acquire('audio'); } catch (e2) { problems.push('Микрофон: ' + await deviceError('mic', e2)); }
-      try { videoTrack = await acquire('video'); } catch (e2) { problems.push('Видео: ' + await deviceError('cam', e2)); }
-    }
-  } else {
-    if (!audioTrack) {
-      try { audioTrack = await acquire('audio'); } catch (e) { problems.push('Микрофон: ' + await deviceError('mic', e)); }
-    }
-    if (!videoTrack) {
-      try { videoTrack = await acquire('video'); } catch (e) { problems.push('Видео: ' + await deviceError('cam', e)); }
-    }
+  if (!audioTrack) {
+    try { audioTrack = await acquire('audio'); } catch (e) { problems.push('Микрофон: ' + await deviceError('mic', e)); }
   }
   setDevBtn('mic', audioTrack ? true : ((await permState('mic')) === 'denied' ? 'denied' : false));
   setDevBtn('cam', videoTrack ? true : ((await permState('cam')) === 'denied' ? 'denied' : false));
