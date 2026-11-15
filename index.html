@@ -571,12 +571,31 @@ function showRoom() {
 
 async function send(to, type, data) {
   try {
-    await fetch(API, {
+    const r = await fetch(API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ room: roomCode, from: myId, to, type, data }),
     });
-  } catch {}
+    if (!r.ok) {
+      console.error('signal POST failed', r.status, await r.text().catch(() => ''));
+      signalBroken(r.status);
+    }
+  } catch (e) {
+    console.error('signal POST network error', e);
+    signalBroken('network');
+  }
+}
+
+let signalWarned = false;
+function signalBroken(status) {
+  if (signalWarned) return;
+  signalWarned = true;
+  const msg = status === 404
+    ? 'Сервер сигналинга не найден (404). Функция /api/signal не задеплоена — проверь папку netlify/functions на Netlify.'
+    : status === 'network'
+      ? 'Нет связи с сервером сигналинга — проверь интернет или адрес сайта.'
+      : `Сервер сигналинга вернул ошибку ${status}. Проверь логи функции signal в Netlify.`;
+  toast(msg, 15000);
 }
 
 function startPolling() {
@@ -588,11 +607,19 @@ async function pollLoop() {
   while (polling) {
     try {
       const r = await fetch(`${API}?room=${encodeURIComponent(roomCode)}&peer=${encodeURIComponent(myId)}`);
-      const msgs = await r.json();
-      for (const m of msgs) {
-        try { await handle(m); } catch (e) { console.error(e); }
+      if (!r.ok) {
+        console.error('signal GET failed', r.status, await r.text().catch(() => ''));
+        signalBroken(r.status);
+      } else {
+        const msgs = await r.json();
+        for (const m of msgs) {
+          try { await handle(m); } catch (e) { console.error(e); }
+        }
       }
-    } catch {}
+    } catch (e) {
+      console.error('signal GET network error', e);
+      signalBroken('network');
+    }
     await new Promise(res => setTimeout(res, 1000));
   }
 }
