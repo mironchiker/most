@@ -1,3 +1,13 @@
 [build]
   publish = "."
   functions = "netlify/functions"
+
+# Явный редирект-страховка: даже если автоматический роутинг по
+# export const config = { path: "/api/signal" } в самой функции
+# не подхватится рантаймом, запрос всё равно дойдёт до неё напрямую
+# по стандартному адресу /.netlify/functions/<имя>.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+  force = true
