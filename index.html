@@ -245,6 +245,7 @@
     color: #fecaca;
     font-size: 14px;
     line-height: 1.4;
+    white-space: pre-line;
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
     opacity: 0;
     pointer-events: none;
@@ -337,6 +338,8 @@ const pcs = new Map();
 const pending = new Map();
 const members = new Set();
 const states = new Map();
+const negs = new Map();
+const remoteStreams = new Map();
 
 function randomCode() {
   let s = 'Most-';
@@ -375,6 +378,23 @@ function explainMediaError(e) {
   }
 }
 
+const BLOCKED_TEXT = 'Браузер заблокировал доступ к устройству. В Chrome: нажми на замок (или значок настроек) слева от адреса → Разрешения → Микрофон и Камера → Разрешить, затем обнови страницу. Если и это не помогло, на телефоне: Настройки → Приложения → Chrome → Разрешения → Микрофон и Камера → Разрешить.';
+
+async function permState(kind) {
+  try {
+    const r = await navigator.permissions.query({ name: kind === 'mic' ? 'microphone' : 'camera' });
+    return r.state;
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function deviceError(kind, e) {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) return explainMediaError(e);
+  if ((await permState(kind)) === 'denied') return BLOCKED_TEXT;
+  return explainMediaError(e);
+}
+
 function acquire(kind) {
   return navigator.mediaDevices.getUserMedia(kind === 'audio' ? { audio: true } : { video: true })
     .then(s => kind === 'audio' ? s.getAudioTracks()[0] : s.getVideoTracks()[0]);
@@ -387,34 +407,32 @@ function setDevBtn(kind, ok) {
 }
 
 async function requestDevice(kind) {
-  setErr('');
   const have = kind === 'mic' ? audioTrack : videoTrack;
   if (have) return;
+  setErr('Жду ответа браузера…');
   try {
     const t = await acquire(kind === 'mic' ? 'audio' : 'video');
     if (kind === 'mic') audioTrack = t; else videoTrack = t;
     setDevBtn(kind, true);
+    setErr('');
   } catch (e) {
     setDevBtn(kind, false);
-    setErr(explainMediaError(e));
+    setErr(await deviceError(kind, e));
   }
 }
 
 async function getMedia() {
-  const denied = [];
-  let lastErr = null;
+  const problems = [];
   if (!audioTrack) {
-    try { audioTrack = await acquire('audio'); } catch (e) { denied.push('микрофону'); lastErr = e; }
+    try { audioTrack = await acquire('audio'); } catch (e) { problems.push('Микрофон: ' + await deviceError('mic', e)); }
   }
   if (!videoTrack) {
-    try { videoTrack = await acquire('video'); } catch (e) { denied.push('камере'); lastErr = e; }
+    try { videoTrack = await acquire('video'); } catch (e) { problems.push('Камера: ' + await deviceError('cam', e)); }
   }
   setDevBtn('mic', !!audioTrack);
   setDevBtn('cam', !!videoTrack);
   localStream = new MediaStream([audioTrack, videoTrack].filter(Boolean));
-  if (denied.length) {
-    toast(`Нет доступа к ${denied.join(' и ')}. ${explainMediaError(lastErr)}`, 9000);
-  }
+  if (problems.length) toast(problems.join('\n\n'), 12000);
   syncControls();
 }
 
@@ -432,8 +450,6 @@ function broadcastState() {
 function syncControls() {
   const a = localStream?.getAudioTracks()[0];
   const v = localStream?.getVideoTracks()[0];
-  $('micBtn').disabled = !a;
-  $('camBtn').disabled = !v;
   setToggle('mic', !!a?.enabled);
   setToggle('cam', !!v?.enabled);
   refreshTile('self');
@@ -537,8 +553,31 @@ function makePC(id) {
   if (pcs.has(id)) return pcs.get(id);
   const pc = new RTCPeerConnection(ICE);
   pcs.set(id, pc);
+  const n = { making: false, ignore: false, polite: myId < id };
+  negs.set(id, n);
   pc.onicecandidate = e => { if (e.candidate) send(id, 'ice', e.candidate); };
-  pc.ontrack = e => addTile(id, e.streams[0] || new MediaStream([e.track]));
+  pc.onnegotiationneeded = async () => {
+    try {
+      n.making = true;
+      await pc.setLocalDescription();
+      await send(id, 'offer', { type: pc.localDescription.type, sdp: pc.localDescription.sdp });
+    } catch (e) {
+      console.error(e);
+    } finally {
+      n.making = false;
+    }
+  };
+  pc.ontrack = e => {
+    let s = remoteStreams.get(id);
+    if (!s) {
+      s = new MediaStream();
+      remoteStreams.set(id, s);
+    }
+    s.addTrack(e.track);
+    addTile(id, s);
+    e.track.onunmute = () => refreshTile(id);
+    refreshTile(id);
+  };
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected') send(id, 'state', myState());
     if (pc.connectionState === 'failed' || pc.connectionState === 'closed') dropPeer(id);
@@ -551,15 +590,14 @@ function dropPeer(id) {
   pcs.delete(id);
   pending.delete(id);
   members.delete(id);
+  negs.delete(id);
+  remoteStreams.delete(id);
   removeTile(id);
 }
 
 async function callPeer(id) {
   if (pcs.has(id)) return;
-  const pc = makePC(id);
-  addLocal(pc);
-  await pc.setLocalDescription(await pc.createOffer());
-  await send(id, 'offer', { type: pc.localDescription.type, sdp: pc.localDescription.sdp });
+  addLocal(makePC(id));
 }
 
 async function addIce(id, cand) {
@@ -597,6 +635,9 @@ async function handle(m) {
   if (m.type === 'offer') {
     const fresh = !pcs.has(m.from);
     const pc = makePC(m.from);
+    const n = negs.get(m.from);
+    n.ignore = !n.polite && (n.making || pc.signalingState !== 'stable');
+    if (n.ignore) return;
     await pc.setRemoteDescription(m.data);
     await flushIce(m.from);
     if (fresh) addLocal(pc);
@@ -607,7 +648,7 @@ async function handle(m) {
 
   if (m.type === 'answer') {
     const pc = pcs.get(m.from);
-    if (!pc) return;
+    if (!pc || pc.signalingState !== 'have-local-offer') return;
     await pc.setRemoteDescription(m.data);
     await flushIce(m.from);
     return;
@@ -660,10 +701,36 @@ async function joinRoom(code) {
   }
 }
 
-function toggleTrack(kind) {
-  const track = kind === 'audio' ? localStream?.getAudioTracks()[0] : localStream?.getVideoTracks()[0];
-  if (!track) return;
+async function toggleTrack(kind) {
+  const track = kind === 'audio' ? audioTrack : videoTrack;
+  if (!track) {
+    await enableDevice(kind);
+    return;
+  }
   track.enabled = !track.enabled;
+  syncControls();
+  broadcastState();
+}
+
+async function enableDevice(kind) {
+  let track;
+  try {
+    track = await acquire(kind);
+  } catch (e) {
+    toast(await deviceError(kind === 'audio' ? 'mic' : 'cam', e), 9000);
+    return;
+  }
+  if (kind === 'audio') audioTrack = track; else videoTrack = track;
+  localStream.addTrack(track);
+  for (const pc of pcs.values()) {
+    const tr = pc.getTransceivers().find(t => t.receiver.track.kind === track.kind && !t.sender.track);
+    if (tr) {
+      await tr.sender.replaceTrack(track);
+      tr.direction = 'sendrecv';
+    } else {
+      pc.addTrack(track, localStream);
+    }
+  }
   syncControls();
   broadcastState();
 }
@@ -677,6 +744,8 @@ function leave() {
   pending.clear();
   members.clear();
   states.clear();
+  negs.clear();
+  remoteStreams.clear();
   audioTrack?.stop();
   videoTrack?.stop();
   audioTrack = null;
