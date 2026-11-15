@@ -87,8 +87,32 @@
   .btn-ghost:hover { background: rgba(255, 255, 255, 0.1); }
 
   .devices { display: flex; gap: 10px; }
-  .dev { flex: 1; padding: 12px 10px; font-size: 14px; }
-  .dev.granted { border-color: rgba(34, 197, 94, 0.5); color: #86efac; background: rgba(34, 197, 94, 0.1); }
+  .dev {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 14px 10px 12px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s, transform 0.12s;
+  }
+  .dev:active { transform: scale(0.97); }
+  .dev:hover { background: rgba(255, 255, 255, 0.07); }
+  .dev .ico { width: 26px; height: 26px; color: var(--muted); transition: color 0.2s; }
+  .dev .ico svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .dev .label { font-size: 13px; font-weight: 600; color: var(--text); }
+  .dev .status { font-size: 11px; color: var(--muted); }
+  .dev.granted { border-color: rgba(34, 197, 94, 0.5); background: rgba(34, 197, 94, 0.08); }
+  .dev.granted .ico { color: #86efac; }
+  .dev.granted .status { color: #86efac; }
+  .dev.denied { border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.07); }
+  .dev.denied .ico { color: #fca5a5; }
+  .dev.denied .status { color: #fca5a5; }
 
   .join-box { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
   input#codeInput {
@@ -267,8 +291,16 @@
     <h1 class="logo">Most</h1>
     <p class="sub">Видеозвонки в один клик</p>
     <div class="devices">
-      <button id="micPerm" class="btn btn-ghost dev">Микрофон: разрешить</button>
-      <button id="camPerm" class="btn btn-ghost dev">Камера: разрешить</button>
+      <button id="micPerm" class="dev" type="button">
+        <span class="ico"><svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/></svg></span>
+        <span class="label">Микрофон</span>
+        <span class="status" id="micStatus">не разрешён</span>
+      </button>
+      <button id="camPerm" class="dev" type="button">
+        <span class="ico"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l6-3v10l-6-3"/></svg></span>
+        <span class="label">Видео</span>
+        <span class="status" id="camStatus">не разрешено</span>
+      </button>
     </div>
     <button id="createBtn" class="btn btn-primary">Создать комнату</button>
     <button id="joinBtn" class="btn btn-ghost">Подключиться</button>
@@ -400,37 +432,79 @@ function acquire(kind) {
     .then(s => kind === 'audio' ? s.getAudioTracks()[0] : s.getVideoTracks()[0]);
 }
 
-function setDevBtn(kind, ok) {
+// Запрашивает микрофон и камеру ОДНИМ вызовом getUserMedia, если ни один
+// из них ещё не выдан — так браузер показывает один нормальный диалог
+// разрешений на оба устройства сразу, а не два по очереди.
+async function acquireBoth() {
+  const s = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+  return { audio: s.getAudioTracks()[0], video: s.getVideoTracks()[0] };
+}
+
+function setDevBtn(kind, state) {
+  // state: true (granted) | false (not requested) | 'denied'
   const b = $(kind + 'Perm');
-  b.classList.toggle('granted', ok);
-  b.textContent = (kind === 'mic' ? 'Микрофон' : 'Камера') + (ok ? ': ✓' : ': разрешить');
+  const status = $(kind + 'Status');
+  b.classList.toggle('granted', state === true);
+  b.classList.toggle('denied', state === 'denied');
+  status.textContent = state === true
+    ? 'разрешено'
+    : state === 'denied'
+      ? 'заблокировано'
+      : (kind === 'mic' ? 'не разрешён' : 'не разрешено');
 }
 
 async function requestDevice(kind) {
   const have = kind === 'mic' ? audioTrack : videoTrack;
   if (have) return;
   setErr('Жду ответа браузера…');
+  const needAudio = kind === 'mic' && !audioTrack;
+  const needVideo = kind === 'cam' && !videoTrack;
+  const alsoOther = kind === 'mic' ? !videoTrack : !audioTrack;
   try {
-    const t = await acquire(kind === 'mic' ? 'audio' : 'video');
-    if (kind === 'mic') audioTrack = t; else videoTrack = t;
-    setDevBtn(kind, true);
+    if (alsoOther && !audioTrack && !videoTrack) {
+      // ни разу не спрашивали — просим оба устройства одним запросом
+      const { audio, video } = await acquireBoth();
+      audioTrack = audio;
+      videoTrack = video;
+      setDevBtn('mic', true);
+      setDevBtn('cam', true);
+    } else {
+      const t = await acquire(kind === 'mic' ? 'audio' : 'video');
+      if (kind === 'mic') audioTrack = t; else videoTrack = t;
+      setDevBtn(kind, true);
+    }
     setErr('');
   } catch (e) {
-    setDevBtn(kind, false);
+    const denied = (await permState(kind)) === 'denied';
+    setDevBtn(kind, denied ? 'denied' : false);
     setErr(await deviceError(kind, e));
   }
 }
 
 async function getMedia() {
   const problems = [];
-  if (!audioTrack) {
-    try { audioTrack = await acquire('audio'); } catch (e) { problems.push('Микрофон: ' + await deviceError('mic', e)); }
+  if (!audioTrack && !videoTrack) {
+    // первый вход в комнату: один объединённый запрос вместо двух подряд
+    try {
+      const { audio, video } = await acquireBoth();
+      audioTrack = audio;
+      videoTrack = video;
+    } catch (e) {
+      // юзер мог отклонить общий диалог — пробуем по отдельности,
+      // чтобы дать использовать хотя бы одно устройство
+      try { audioTrack = await acquire('audio'); } catch (e2) { problems.push('Микрофон: ' + await deviceError('mic', e2)); }
+      try { videoTrack = await acquire('video'); } catch (e2) { problems.push('Видео: ' + await deviceError('cam', e2)); }
+    }
+  } else {
+    if (!audioTrack) {
+      try { audioTrack = await acquire('audio'); } catch (e) { problems.push('Микрофон: ' + await deviceError('mic', e)); }
+    }
+    if (!videoTrack) {
+      try { videoTrack = await acquire('video'); } catch (e) { problems.push('Видео: ' + await deviceError('cam', e)); }
+    }
   }
-  if (!videoTrack) {
-    try { videoTrack = await acquire('video'); } catch (e) { problems.push('Камера: ' + await deviceError('cam', e)); }
-  }
-  setDevBtn('mic', !!audioTrack);
-  setDevBtn('cam', !!videoTrack);
+  setDevBtn('mic', audioTrack ? true : ((await permState('mic')) === 'denied' ? 'denied' : false));
+  setDevBtn('cam', videoTrack ? true : ((await permState('cam')) === 'denied' ? 'denied' : false));
   localStream = new MediaStream([audioTrack, videoTrack].filter(Boolean));
   if (problems.length) toast(problems.join('\n\n'), 12000);
   syncControls();
