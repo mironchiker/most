@@ -86,8 +86,11 @@
   .btn-ghost { background: rgba(255, 255, 255, 0.05); border-color: var(--border); }
   .btn-ghost:hover { background: rgba(255, 255, 255, 0.1); }
 
+  .devices { display: flex; gap: 10px; }
+  .dev { flex: 1; padding: 12px 10px; font-size: 14px; }
+  .dev.granted { border-color: rgba(34, 197, 94, 0.5); color: #86efac; background: rgba(34, 197, 94, 0.1); }
+
   .join-box { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
-  .join-box.hidden { display: none; }
   input#codeInput {
     width: 100%;
     padding: 15px;
@@ -106,7 +109,7 @@
   input#codeInput:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(124, 92, 255, 0.2); }
   input#codeInput::placeholder { color: #4b5263; letter-spacing: 1px; }
 
-  .err { color: #fca5a5; min-height: 1.2em; font-size: 14px; margin: 0; }
+  .err { color: #fca5a5; min-height: 1.2em; font-size: 14px; margin: 0; line-height: 1.4; }
 
   #room {
     min-height: 100vh;
@@ -158,32 +161,38 @@
     border: 1px solid var(--border);
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
   }
-  .tile video { width: 100%; height: 100%; object-fit: cover; background: #000; display: block; }
+  .tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
   .tile.self video { transform: scaleX(-1); }
+  .tile.cam-off video { opacity: 0; }
   .tile .avatar {
     position: absolute;
     inset: 0;
     display: none;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    font-size: 56px;
-    font-weight: 700;
-    color: rgba(255, 255, 255, 0.85);
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    gap: 14px;
+    color: #cbd5e1;
+    font-size: 15px;
+    background: linear-gradient(145deg, #1c2130, #0c0f16);
   }
-  .tile.no-video .avatar { display: flex; }
-  .tile.no-video video { opacity: 0; }
+  .tile.cam-off .avatar { display: flex; }
+  .ico-big svg { width: 72px; height: 72px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
   .tag {
     position: absolute;
     left: 12px;
     bottom: 12px;
+    display: inline-flex;
+    align-items: center;
     padding: 6px 12px;
     border-radius: 10px;
     background: rgba(0, 0, 0, 0.55);
     backdrop-filter: blur(6px);
     font-size: 13px;
   }
-  .tile.self .tag::before { content: "Ты · "; color: var(--accent2); }
+  .tile:not(.mic-off) .mi { display: none; }
+  .mi { display: inline-flex; margin-right: 6px; color: #fca5a5; }
+  .mi svg, .ico svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
   .controls {
     position: fixed;
@@ -256,6 +265,10 @@
   <div class="card">
     <h1 class="logo">Most</h1>
     <p class="sub">Видеозвонки в один клик</p>
+    <div class="devices">
+      <button id="micPerm" class="btn btn-ghost dev">Микрофон: разрешить</button>
+      <button id="camPerm" class="btn btn-ghost dev">Камера: разрешить</button>
+    </div>
     <button id="createBtn" class="btn btn-primary">Создать комнату</button>
     <button id="joinBtn" class="btn btn-ghost">Подключиться</button>
     <div id="joinBox" class="join-box hidden">
@@ -304,6 +317,10 @@ const ICE = {
 };
 const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_RE = /^Most-[A-Z2-9]{5}$/;
+const ICON = {
+  micOff: '<svg viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M9 9v2a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.7-1.3"/><path d="M19 11a7 7 0 0 1-.8 3.2M5 11a7 7 0 0 0 10.7 5.9M12 18v3"/></svg>',
+  camOff: '<svg viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l6-3v10l-6-3"/><path d="M3 3l18 18"/></svg>',
+};
 const $ = id => document.getElementById(id);
 
 let myId = null;
@@ -312,11 +329,14 @@ let isHost = false;
 let roomShown = false;
 let polling = false;
 let localStream = null;
+let audioTrack = null;
+let videoTrack = null;
 let joinTimer = null;
 let toastTimer = null;
 const pcs = new Map();
 const pending = new Map();
 const members = new Set();
+const states = new Map();
 
 function randomCode() {
   let s = 'Most-';
@@ -339,49 +359,84 @@ function toast(text, ms = 5000) {
 }
 
 function explainMediaError(e) {
-  if (!window.isSecureContext || !navigator.mediaDevices) {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
     return 'Камера и микрофон работают только по https. Открой сайт через https-ссылку.';
   }
-  if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') {
-    return 'Доступ к камере и микрофону запрещён. Разреши его в настройках браузера и попробуй снова.';
+  switch (e?.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'Доступ не разрешён. Нажми кнопку ещё раз и выбери «Разрешить». Если запрос не появляется, открой настройки сайта (значок замка у адреса) и разреши микрофон и камеру.';
+    case 'NotFoundError':
+      return 'Устройство не найдено.';
+    case 'NotReadableError':
+      return 'Устройство занято другим приложением.';
+    default:
+      return 'Не удалось получить доступ к устройству.';
   }
-  if (e?.name === 'NotFoundError') return 'Камера или микрофон не найдены.';
-  if (e?.name === 'NotReadableError') return 'Камера или микрофон заняты другим приложением.';
-  return 'Не удалось получить камеру и микрофон.';
+}
+
+function acquire(kind) {
+  return navigator.mediaDevices.getUserMedia(kind === 'audio' ? { audio: true } : { video: true })
+    .then(s => kind === 'audio' ? s.getAudioTracks()[0] : s.getVideoTracks()[0]);
+}
+
+function setDevBtn(kind, ok) {
+  const b = $(kind + 'Perm');
+  b.classList.toggle('granted', ok);
+  b.textContent = (kind === 'mic' ? 'Микрофон' : 'Камера') + (ok ? ': ✓' : ': разрешить');
+}
+
+async function requestDevice(kind) {
+  setErr('');
+  const have = kind === 'mic' ? audioTrack : videoTrack;
+  if (have) return;
+  try {
+    const t = await acquire(kind === 'mic' ? 'audio' : 'video');
+    if (kind === 'mic') audioTrack = t; else videoTrack = t;
+    setDevBtn(kind, true);
+  } catch (e) {
+    setDevBtn(kind, false);
+    setErr(explainMediaError(e));
+  }
 }
 
 async function getMedia() {
-  localStream = null;
+  const denied = [];
   let lastErr = null;
-  if (navigator.mediaDevices?.getUserMedia) {
-    const attempts = [
-      { audio: true, video: true },
-      { audio: true, video: false },
-      { audio: false, video: true },
-    ];
-    for (const c of attempts) {
-      try {
-        localStream = await navigator.mediaDevices.getUserMedia(c);
-        break;
-      } catch (e) {
-        lastErr = e;
-      }
-    }
+  if (!audioTrack) {
+    try { audioTrack = await acquire('audio'); } catch (e) { denied.push('микрофону'); lastErr = e; }
   }
-  if (!localStream) {
-    localStream = new MediaStream();
-    toast(explainMediaError(lastErr) + ' Комната будет без микрофона и видео.', 8000);
+  if (!videoTrack) {
+    try { videoTrack = await acquire('video'); } catch (e) { denied.push('камере'); lastErr = e; }
+  }
+  setDevBtn('mic', !!audioTrack);
+  setDevBtn('cam', !!videoTrack);
+  localStream = new MediaStream([audioTrack, videoTrack].filter(Boolean));
+  if (denied.length) {
+    toast(`Нет доступа к ${denied.join(' и ')}. ${explainMediaError(lastErr)}`, 9000);
   }
   syncControls();
 }
 
+function myState() {
+  return {
+    mic: !!localStream?.getAudioTracks()[0]?.enabled,
+    cam: !!localStream?.getVideoTracks()[0]?.enabled,
+  };
+}
+
+function broadcastState() {
+  for (const id of pcs.keys()) send(id, 'state', myState());
+}
+
 function syncControls() {
-  const hasAudio = !!localStream?.getAudioTracks().length;
-  const hasVideo = !!localStream?.getVideoTracks().length;
-  $('micBtn').disabled = !hasAudio;
-  $('camBtn').disabled = !hasVideo;
-  setToggle('mic', hasAudio && localStream.getAudioTracks()[0].enabled);
-  setToggle('cam', hasVideo && localStream.getVideoTracks()[0].enabled);
+  const a = localStream?.getAudioTracks()[0];
+  const v = localStream?.getVideoTracks()[0];
+  $('micBtn').disabled = !a;
+  $('camBtn').disabled = !v;
+  setToggle('mic', !!a?.enabled);
+  setToggle('cam', !!v?.enabled);
+  refreshTile('self');
 }
 
 function setToggle(kind, on) {
@@ -390,6 +445,16 @@ function setToggle(kind, on) {
   $(kind + 'On').classList.toggle('hidden', !on);
   $(kind + 'Off').classList.toggle('hidden', on);
   btn.title = (kind === 'mic' ? 'Микрофон' : 'Камера') + (on ? ': вкл' : ': выкл');
+}
+
+function refreshTile(id) {
+  const tile = $('tile-' + id);
+  if (!tile) return;
+  const v = tile.querySelector('video');
+  const st = id === 'self' ? myState() : (states.get(id) || { mic: true, cam: true });
+  const hasVideo = !!v.srcObject?.getVideoTracks().length;
+  tile.classList.toggle('cam-off', !hasVideo || !st.cam);
+  tile.classList.toggle('mic-off', !st.mic);
 }
 
 function addTile(id, stream, self = false) {
@@ -404,19 +469,23 @@ function addTile(id, stream, self = false) {
   if (self) v.muted = true;
   const avatar = document.createElement('div');
   avatar.className = 'avatar';
-  avatar.textContent = self ? 'Я' : '?';
+  avatar.innerHTML = `<div class="ico-big">${ICON.camOff}</div><span>Камера выключена</span>`;
   const tag = document.createElement('span');
   tag.className = 'tag';
-  tag.textContent = self ? 'Камера' : 'Участник';
+  tag.innerHTML = `<span class="mi">${ICON.micOff}</span>${self ? 'Ты' : 'Участник'}`;
   tile.append(v, avatar, tag);
   $('grid').appendChild(tile);
-  const update = () => tile.classList.toggle('no-video', !v.srcObject?.getVideoTracks().length);
-  update();
-  stream.addEventListener?.('addtrack', update);
-  stream.addEventListener?.('removetrack', update);
+  if (!self) {
+    stream.addEventListener?.('addtrack', () => refreshTile(id));
+    stream.addEventListener?.('removetrack', () => refreshTile(id));
+  }
+  refreshTile(id);
 }
 
-function removeTile(id) { $('tile-' + id)?.remove(); }
+function removeTile(id) {
+  $('tile-' + id)?.remove();
+  states.delete(id);
+}
 
 function showRoom() {
   roomShown = true;
@@ -471,6 +540,7 @@ function makePC(id) {
   pc.onicecandidate = e => { if (e.candidate) send(id, 'ice', e.candidate); };
   pc.ontrack = e => addTile(id, e.streams[0] || new MediaStream([e.track]));
   pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected') send(id, 'state', myState());
     if (pc.connectionState === 'failed' || pc.connectionState === 'closed') dropPeer(id);
   };
   return pc;
@@ -525,10 +595,11 @@ async function handle(m) {
   }
 
   if (m.type === 'offer') {
+    const fresh = !pcs.has(m.from);
     const pc = makePC(m.from);
     await pc.setRemoteDescription(m.data);
     await flushIce(m.from);
-    addLocal(pc);
+    if (fresh) addLocal(pc);
     await pc.setLocalDescription(await pc.createAnswer());
     await send(m.from, 'answer', { type: pc.localDescription.type, sdp: pc.localDescription.sdp });
     return;
@@ -543,6 +614,12 @@ async function handle(m) {
   }
 
   if (m.type === 'ice') return addIce(m.from, m.data);
+
+  if (m.type === 'state') {
+    states.set(m.from, m.data);
+    refreshTile(m.from);
+    return;
+  }
 
   if (m.type === 'bye') dropPeer(m.from);
 }
@@ -587,7 +664,8 @@ function toggleTrack(kind) {
   const track = kind === 'audio' ? localStream?.getAudioTracks()[0] : localStream?.getVideoTracks()[0];
   if (!track) return;
   track.enabled = !track.enabled;
-  setToggle(kind === 'audio' ? 'mic' : 'cam', track.enabled);
+  syncControls();
+  broadcastState();
 }
 
 function leave() {
@@ -598,7 +676,11 @@ function leave() {
   pcs.clear();
   pending.clear();
   members.clear();
-  localStream?.getTracks().forEach(t => t.stop());
+  states.clear();
+  audioTrack?.stop();
+  videoTrack?.stop();
+  audioTrack = null;
+  videoTrack = null;
   localStream = null;
   $('grid').innerHTML = '';
   roomShown = false;
@@ -611,6 +693,8 @@ function leave() {
   $('createBtn').disabled = false;
   $('createBtn').textContent = 'Создать комнату';
   $('joinGo').disabled = false;
+  setDevBtn('mic', false);
+  setDevBtn('cam', false);
 }
 
 window.addEventListener('pagehide', () => {
@@ -620,6 +704,8 @@ window.addEventListener('pagehide', () => {
   }
 });
 
+$('micPerm').onclick = () => requestDevice('mic');
+$('camPerm').onclick = () => requestDevice('cam');
 $('createBtn').onclick = createRoom;
 $('joinBtn').onclick = () => $('joinBox').classList.toggle('hidden');
 
